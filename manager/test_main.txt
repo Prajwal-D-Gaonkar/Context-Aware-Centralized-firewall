@@ -1,0 +1,38 @@
+Test the Manager quickly (examples)
+1) Health check
+curl http://localhost:8000/health
+
+2) Check a benign request
+curl -X POST http://localhost:8000/check \
+  -H "Content-Type: application/json" \
+  -d '{"app":"demo_app","ip":"127.0.0.1","path":"/login","method":"POST","body":"username=alice&password=pass"}'
+
+3) Check a SQLi-like request (should be blocked by seeded policy)
+curl -X POST http://localhost:8000/check \
+  -H "Content-Type: application/json" \
+  -d '{"app":"demo_app","ip":"10.0.0.5","path":"/search","method":"GET","body":"q=1 UNION SELECT username, password FROM users"}'
+
+4) List events (recent logs)
+curl "http://localhost:8000/events?limit=20"
+
+5) View policies
+curl "http://localhost:8000/policies"
+
+6) Add a policy (example)
+curl -X POST http://localhost:8000/policies -H "Content-Type: application/json" -d '{
+  "app":"demo_app",
+  "name":"Block bad IP",
+  "description":"block known bad IPs",
+  "action":"block",
+  "conditions": {"blocked_ips":["1.2.3.4"]}
+}'
+
+Next steps (recommended)
+
+Integrate ML model later by replacing ml_score_placeholder() with a real model loaded from ml/ (e.g., IsolationForest).
+
+Add authentication to manager API (JWT) before deploying beyond demo.
+
+Connect the Agent (in agent/) — agent will POST to /check for each incoming request and apply the returned verdict.
+
+Dashboard will call /events and /policies to show real-time logs and manage policies.
