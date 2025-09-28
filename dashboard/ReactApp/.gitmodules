@@ -1,0 +1,3 @@
+[submodule "dashboard/ReactApp/context-firewall-ui"]
+	path = dashboard/ReactApp/context-firewall-ui
+	url = https://github.com/Prajwal-D-Gaonkar/Context-Aware-Centralized-firewall.git
