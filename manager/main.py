@@ -1,5 +1,6 @@
 # manager/main.py
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import sqlite3
@@ -12,6 +13,20 @@ DB_FILE = "manager.db"
 
 app = FastAPI(title="CACF - Central Manager", version="0.1")
 
+# -------------------------
+# CORS configuration
+# -------------------------
+origins = [
+    "http://localhost:3000",  # React frontend dev URL
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # -------------------------
 # Pydantic models
@@ -38,7 +53,6 @@ class PolicyCreate(BaseModel):
 class Policy(PolicyCreate):
     id: int
 
-
 # -------------------------
 # DB helpers
 # -------------------------
@@ -49,33 +63,33 @@ def init_db():
     # events table logs decisions
     c.execute(
         """
-    CREATE TABLE IF NOT EXISTS events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ts TEXT,
-        app TEXT,
-        ip TEXT,
-        path TEXT,
-        method TEXT,
-        user TEXT,
-        verdict TEXT,
-        reason TEXT,
-        ml_score REAL,
-        payload TEXT
-    )
-    """
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT,
+            app TEXT,
+            ip TEXT,
+            path TEXT,
+            method TEXT,
+            user TEXT,
+            verdict TEXT,
+            reason TEXT,
+            ml_score REAL,
+            payload TEXT
+        )
+        """
     )
     # policies stored as JSON in DB
     c.execute(
         """
-    CREATE TABLE IF NOT EXISTS policies (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        app TEXT,
-        name TEXT,
-        description TEXT,
-        action TEXT,
-        conditions TEXT
-    )
-    """
+        CREATE TABLE IF NOT EXISTS policies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            app TEXT,
+            name TEXT,
+            description TEXT,
+            action TEXT,
+            conditions TEXT
+        )
+        """
     )
     conn.commit()
     return conn
@@ -88,9 +102,9 @@ def save_event(event: dict):
     c = db.cursor()
     c.execute(
         """
-    INSERT INTO events (ts, app, ip, path, method, user, verdict, reason, ml_score, payload)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """,
+        INSERT INTO events (ts, app, ip, path, method, user, verdict, reason, ml_score, payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
         (
             event.get("ts"),
             event.get("app"),
@@ -170,55 +184,41 @@ def delete_policy_record(policy_id: int):
     db.commit()
     return c.rowcount
 
-
 # -------------------------
 # Simple policy evaluation logic
 # -------------------------
 def evaluate_with_policies(ctx: RequestContext):
-    """
-    Returns: verdict (allow/review/block), reason, ml_score (float)
-    Simple logic:
-      - Load all policies for ctx.app (and global ones)
-      - Evaluate conditions: blocked_ips, allowed_ips, block_if_contains (strings in body/headers)
-      - If any policy triggers block => block
-      - Else run a placeholder ML scoring (0..1 anomaly) and decide based on threshold
-    """
     policies = get_policies_list()
-    # collect policies that apply to this ctx.app or global "*"
     relevant = [p for p in policies if p["app"] == ctx.app or p["app"] == "*"]
 
     body_lower = (ctx.body or "").lower()
     headers_concat = " ".join([f"{k}:{v}" for k, v in (ctx.headers or {}).items()]).lower()
 
-    # Rule checks from policies
     for p in relevant:
         cond = p.get("conditions", {}) or {}
-        # blocked_ips
         blocked_ips = cond.get("blocked_ips", [])
         if ctx.ip in blocked_ips:
             return "block", f"IP {ctx.ip} in blocked_ips (policy: {p['name']})", 1.0
-        # allowed_ips (if defined, and ip not in list -> block)
+
         allowed_ips = cond.get("allowed_ips", None)
         if allowed_ips is not None and ctx.ip not in allowed_ips:
             return "block", f"IP {ctx.ip} not in allowed_ips (policy: {p['name']})", 1.0
-        # block_if_contains - substrings to search in body/headers/path
+
         block_if_contains = cond.get("block_if_contains", [])
         for token in block_if_contains:
             if token.lower() in body_lower or token.lower() in headers_concat or token.lower() in (ctx.path or "").lower():
                 return "block", f"Matched token '{token}' in request (policy: {p['name']})", 1.0
-        # rate_limit_per_min - simple check: if events from this IP in last 60s > threshold -> block
+
         rate_limit = cond.get("rate_limit_per_min", None)
         if rate_limit:
             count = count_events_from_ip_last_seconds(ctx.ip, 60)
             if count >= int(rate_limit):
                 return "block", f"Rate limit exceeded ({count} reqs/min) (policy: {p['name']})", 1.0
-        # action review -> treat as review if matched
+
         if p.get("action") == "review":
             return "review", f"Matched policy {p['name']} requiring review", 0.5
 
-    # Placeholder ML scoring: simple heuristic anomaly:
     ml_score = ml_score_placeholder(ctx)
-    # threshold: if ml_score > 0.8 -> anomaly -> block
     if ml_score > 0.8:
         return "block", f"Anomaly score {ml_score:.2f} > 0.8", ml_score
     if ml_score > 0.6:
@@ -228,11 +228,6 @@ def evaluate_with_policies(ctx: RequestContext):
 
 
 def ml_score_placeholder(ctx: RequestContext) -> float:
-    """
-    Very simple scoring for MVP/demo:
-    - long URLs or bodies, or presence of suspicious tokens increases score
-    - returns 0..1
-    """
     score = 0.0
     suspicious_tokens = ["union select", "or 1=1", "<script", "javascript:", "../../", "select ", "insert ", "update ", "drop "]
     body = (ctx.body or "").lower()
@@ -243,15 +238,13 @@ def ml_score_placeholder(ctx: RequestContext) -> float:
     for t in suspicious_tokens:
         if t in concat:
             score += 0.3
-    # add small random-ish heuristic from IP octets (not truly random to keep reproducible)
     try:
         parts = ctx.ip.split(".")
         if len(parts) == 4:
             last = int(parts[-1]) % 10
-            score += (last / 100)  # up to 0.09
+            score += (last / 100)
     except Exception:
         pass
-    # clamp
     return min(1.0, score)
 
 
@@ -262,23 +255,14 @@ def count_events_from_ip_last_seconds(ip: str, seconds: int) -> int:
     r = c.fetchone()
     return r[0] if r else 0
 
-
 # -------------------------
 # API endpoints
 # -------------------------
 @app.post("/check")
 async def check_request(ctx: RequestContext):
-    """
-    Main endpoint used by Agents.
-    Returns: { allowed: bool, verdict: 'allow'|'block'|'review', reason: str, ml_score: float }
-    Also stores a log event in SQLite.
-    """
-    # ensure timestamp
     if not ctx.timestamp:
         ctx.timestamp = datetime.datetime.utcnow().isoformat()
-
     verdict, reason, score = evaluate_with_policies(ctx)
-
     event = {
         "ts": ctx.timestamp,
         "app": ctx.app,
@@ -297,13 +281,96 @@ async def check_request(ctx: RequestContext):
 
 @app.get("/events")
 async def get_events(limit: int = 100, app_name: Optional[str] = None):
-    """
-    Returns most recent events (default limit=100). Optional filter by app_name.
-    """
     ev = fetch_events(limit=limit, app=app_name)
     return {"count": len(ev), "events": ev}
 
 
+# -------------------------
+# Dashboard endpoint
+# -------------------------
+@app.get("/dashboard")
+async def get_dashboard():
+    events = fetch_events(limit=1000)
+    total_requests = len(events)
+    blocked_requests = sum(1 for e in events if e["verdict"] == "block")
+    unique_ips = len(set(e["ip"] for e in events))
+
+    now = datetime.datetime.utcnow()
+    rpm = []
+    for i in range(60):
+        minute = now - datetime.timedelta(minutes=i)
+        count = sum(
+            1
+            for e in events
+            if datetime.datetime.fromisoformat(e["ts"]).replace(second=0, microsecond=0)
+            == minute.replace(second=0, microsecond=0)
+        )
+        rpm.append({"time": minute.strftime("%H:%M"), "value": count})
+    rpm.reverse()
+
+    attacks = {}
+    for e in events:
+        reason = e["reason"].split("(")[0].strip()
+        attacks[reason] = attacks.get(reason, 0) + 1
+    attacks_by_type = [{"type": k, "count": v} for k, v in attacks.items()]
+
+    verdicts = {"allow": 0, "review": 0, "block": 0}
+    for e in events:
+        verdicts[e["verdict"]] += 1
+    verdict_colors = {"allow": "#4ade80", "review": "#facc15", "block": "#f87171"}
+    verdict_distribution = [
+        {"name": k.capitalize(), "value": v, "color": verdict_colors[k]} for k, v in verdicts.items()
+    ]
+
+    return {
+        "totalRequests": total_requests,
+        "blockedRequests": blocked_requests,
+        "uniqueIPs": unique_ips,
+        "requestsPerMinute": rpm,
+        "attacksByType": attacks_by_type,
+        "verdictDistribution": verdict_distribution,
+    }
+
+
+# -------------------------
+# Logs endpoint
+# -------------------------
+@app.get("/logs")
+async def get_logs(page: int = 1, page_size: int = 10, search: Optional[str] = None):
+    all_events = fetch_events(limit=1000)
+
+    if search:
+        search_lower = search.lower()
+        all_events = [
+            e for e in all_events
+            if search_lower in e["ip"].lower()
+            or search_lower in (e["path"] or "").lower()
+            or search_lower in e["reason"].lower()
+        ]
+
+    total = len(all_events)
+    start = (page - 1) * page_size
+    end = start + page_size
+    data = all_events[start:end]
+
+    logs = [
+        {
+            "id": e["id"],
+            "timestamp": e["ts"],
+            "sourceIP": e["ip"],
+            "destinationIP": e.get("destination_ip", "N/A"),
+            "protocol": e.get("method", "HTTP"),
+            "verdict": "Allowed" if e["verdict"] == "allow" else "Blocked",
+            "reason": e["reason"],
+        }
+        for e in data
+    ]
+    return {"data": logs, "total": total}
+
+
+# -------------------------
+# Policies endpoints
+# -------------------------
 @app.get("/policies", response_model=List[Policy])
 async def list_policies():
     return get_policies_list()
@@ -346,43 +413,23 @@ async def health():
 
 
 # -------------------------
-# Bootstrap sample policy(s)
+# Bootstrap sample policies
 # -------------------------
 def seed_sample_policies():
-    # if no policies exist, create a few sensible demo policies
     if not get_policies_list():
-        demo1 = PolicyCreate(
-            app="demo_app",
-            name="Block SQLi keywords",
-            description="Block if request contains common SQL injection patterns",
-            action="block",
-            conditions={"block_if_contains": ["union select", "or 1=1", "' or '", ";--", "drop table"]},
+        save_policy_record(
+            PolicyCreate(
+                app="*",
+                name="Block malicious IP",
+                description="Block known malicious IP addresses",
+                action="block",
+                conditions={"blocked_ips": ["1.2.3.4", "5.6.7.8"]},
+            )
         )
-        save_policy_record(demo1)
-
-        demo2 = PolicyCreate(
-            app="*",
-            name="Block obvious XSS",
-            description="Block if <script> or javascript: found",
-            action="block",
-            conditions={"block_if_contains": ["<script", "javascript:"]},
-        )
-        save_policy_record(demo2)
-
-        demo3 = PolicyCreate(
-            app="demo_app",
-            name="Rate-limit brute-force",
-            description="If >20 reqs/min from same IP, block",
-            action="block",
-            conditions={"rate_limit_per_min": 20},
-        )
-        save_policy_record(demo3)
 
 
-# -------------------------
-# Start server
-# -------------------------
+seed_sample_policies()
+
+
 if __name__ == "__main__":
-    seed_sample_policies()
-    print("Starting Central Manager (FastAPI) on http://0.0.0.0:8000")
     uvicorn.run(app, host="0.0.0.0", port=8000)
