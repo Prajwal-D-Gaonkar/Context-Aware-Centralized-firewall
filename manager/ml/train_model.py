@@ -1,4 +1,4 @@
-# ml/train_model.py
+# manager/ml/train_model.py
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
@@ -6,50 +6,56 @@ from sklearn.ensemble import RandomForestClassifier
 import joblib
 import os
 
-# -----------------------------
-# Load CSV
-csv_path = os.path.join(os.path.dirname(__file__), "csic_database.csv")
-df = pd.read_csv(csv_path)
+# ------------------------- Constants
+BASE_DIR = os.path.dirname(__file__)
+CSV_PATH = os.path.join(BASE_DIR, "csic_database.csv")  # Your CSV file
+MODEL_PATH = os.path.join(BASE_DIR, "ml_model.pkl")
 
-# Strip column names of extra spaces (safer)
-df.columns = df.columns.str.strip()
+# ------------------------- Load dataset
+df = pd.read_csv(CSV_PATH)
 
-# -----------------------------
-# Feature extraction
-# Encode HTTP methods
-df["method_encoded"] = df["Method"].map({"GET":0, "POST":1, "PUT":2, "DELETE":3}).fillna(4)
+# ------------------------- Feature engineering
+df['method'] = df['Method']
+df['path'] = df['URL']
+df['body'] = df['content']
 
-# Path and body lengths
-df["path_len"] = df["URL"].fillna("").apply(lambda x: len(str(x)))
-df["body_len"] = df["content"].fillna("").apply(lambda x: len(str(x)))
+# Encode method
+ANOMALY_METHOD_MAP = {"GET": 0, "POST": 1, "PUT": 2, "DELETE": 3}
+df['method_encoded'] = df['method'].map(ANOMALY_METHOD_MAP).fillna(4).astype(int)
 
-# Count suspicious tokens in the body/content
+# Path length
+df['path_len'] = df['path'].astype(str).str.len()
+
+# Body length
+df['body_len'] = df['body'].astype(str).str.len()
+
+# Suspicious tokens
 tokens = ["select", "union", "drop", "insert", "update", "<script>", "or 1=1"]
-df["num_suspicious_tokens"] = df["content"].fillna("").apply(
-    lambda x: sum(t in str(x).lower() for t in tokens)
+df['num_suspicious_tokens'] = df['body'].astype(str).apply(
+    lambda x: sum(t in x.lower() for t in tokens)
 )
 
-# Check if URL has query parameters
-df["has_query"] = df["URL"].fillna("").apply(lambda x: 1 if "?" in str(x) else 0)
+# Query string in path
+df['has_query'] = df['path'].astype(str).str.contains(r'\?').astype(int)
 
-# -----------------------------
-# Prepare features and labels
-features = ["method_encoded", "path_len", "body_len", "num_suspicious_tokens", "has_query"]
-X = df[features]
-y = df["classification"]
+# ------------------------- Features and target
+feature_cols = ["method_encoded", "path_len", "body_len", "num_suspicious_tokens", "has_query"]
+X = df[feature_cols]
 
-# Split train/test
+# Target column
+y = df['classification']  # 0 = normal, 1 = attack
+
+# ------------------------- Train/test split
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-# -----------------------------
-# Train model
-model = RandomForestClassifier(n_estimators=120, random_state=42)
-model.fit(X_train, y_train)
+# ------------------------- Train model
+clf = RandomForestClassifier(n_estimators=100, random_state=42)
+clf.fit(X_train, y_train)
 
-# Evaluate
-acc = model.score(X_test, y_test)
-print(f"Model accuracy on test set: {acc:.2f}")
+# ------------------------- Evaluate
+acc = clf.score(X_test, y_test)
+print(f"✅ RandomForest trained. Test accuracy: {acc:.3f}")
 
-# Save model
-joblib.dump(model, os.path.join(os.path.dirname(__file__), "ml_model.pkl"))
-print("✅ Model trained and saved in ml/ml_model.pkl")
+# ------------------------- Save model
+joblib.dump(clf, MODEL_PATH)
+print(f"✅ Model saved to {MODEL_PATH}")
