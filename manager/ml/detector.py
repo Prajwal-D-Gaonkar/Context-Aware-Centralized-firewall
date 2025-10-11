@@ -5,16 +5,15 @@ import pandas as pd
 from typing import Optional, Dict, Any
 import os
 
-
+# ------------------------- Constants -------------------------
 ANOMALY_METHOD_MAP = {"GET": 0, "POST": 1, "PUT": 2, "DELETE": 3}
-
 BASE_DIR = os.path.dirname(__file__)
 ANOMALY_MODEL_PATH = os.path.join(BASE_DIR, "ml_model.pkl")
 DDOS_MODEL_PATH = os.path.join(BASE_DIR, "ddos_model.pkl")
 DDOS_FEATURES_PATH = os.path.join(BASE_DIR, "ddos_features.npy")
 DDOS_ENCODERS_PATH = os.path.join(BASE_DIR, "ddos_encoders.pkl")
 
-
+# ------------------------- Load Models -------------------------
 ml_model = None
 try:
     ml_model = joblib.load(ANOMALY_MODEL_PATH)
@@ -33,7 +32,7 @@ try:
 except Exception as e:
     print(f"⚠️ Could not load DDoS model or encoders: {e}")
 
-# ------------------------- Request context
+# ------------------------- Request context -------------------------
 class RequestContext:
     app: str = "default"
     ip: str = "0.0.0.0"
@@ -44,49 +43,74 @@ class RequestContext:
     user: Optional[str] = None
     timestamp: Optional[str] = None
 
-# ------------------------- Heuristic score
+# ------------------------- Heuristic score -------------------------
 def heuristic_score(ctx: RequestContext) -> float:
+    # Safe GETs with no body are zero
+    if ctx.method.upper() == "GET" and not ctx.body:
+        return 0.0
+
     tokens = ["select", "union", "drop", "insert", "update", "<script>", "or 1=1"]
     count = sum(t in (ctx.body or "").lower() for t in tokens)
-    score = min(1.0, 0.1 * count + 0.05 * len(ctx.body or "") / 100)
+    body_len = len(ctx.body or "")
+
+    # Very large payloads flagged high
+    if body_len > 10000:
+        return 1.0
+
+    score = min(1.0, 0.1 * count + 0.05 * body_len / 100)
     return score
 
-# ------------------------- DDoS score
+# ------------------------- DDoS score -------------------------
 def ddos_score(ctx: RequestContext) -> float:
     if not ddos_model or ddos_features is None:
         return 0.0
+
     data = pd.DataFrame(np.zeros((1, len(ddos_features))), columns=ddos_features)
+
     if 'Src IP' in ddos_encoders:
         try:
             data['Src IP'] = ddos_encoders['Src IP'].transform([ctx.ip])[0]
         except ValueError:
             data['Src IP'] = 0
+
     if "Flow Duration" in data.columns:
         data["Flow Duration"] = 1000
     if 'BodyLength' in data.columns:
         data['BodyLength'] = len(ctx.body or "")
+
     try:
         return float(ddos_model.predict_proba(data)[0][1])
     except Exception:
         return 0.0
 
-# ------------------------- Anomaly score
+# ------------------------- Anomaly score -------------------------
 def anomaly_score(ctx: RequestContext) -> float:
+    # Immediately allow safe GET requests
+    if ctx.method.upper() == "GET" and not ctx.body:
+        return 0.0
+
     if ml_model is None:
         return heuristic_score(ctx)
+
     method_encoded = ANOMALY_METHOD_MAP.get(ctx.method.upper(), 4)
     path_len = len(ctx.path or "")
     body_len = len(ctx.body or "")
     has_query = 1 if "?" in (ctx.path or "") else 0
     tokens = ["select", "union", "drop", "insert", "update", "<script>", "or 1=1"]
     num_suspicious_tokens = sum(t in (ctx.body or "").lower() for t in tokens)
+
     features = [[method_encoded, path_len, body_len, num_suspicious_tokens, has_query]]
+
     try:
-        return float(ml_model.predict_proba(features)[0][1])
+        score = float(ml_model.predict_proba(features)[0][1])
+        # Boost score for very large payloads
+        if score < 0.5 and body_len > 10000:
+            return 0.99
+        return score
     except Exception:
         return heuristic_score(ctx)
 
-# ------------------------- Master ML scoring
+# ------------------------- Master ML scoring -------------------------
 def ml_score_model(ctx: RequestContext) -> float:
     score_ddos = ddos_score(ctx)
     score_anom = anomaly_score(ctx)
