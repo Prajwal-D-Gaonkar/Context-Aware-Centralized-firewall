@@ -55,21 +55,16 @@ def heuristic_score(ctx: RequestContext) -> float:
 def ddos_score(ctx: RequestContext) -> float:
     if not ddos_model or ddos_features is None:
         return 0.0
-
     data = pd.DataFrame(np.zeros((1, len(ddos_features))), columns=ddos_features)
-
     if 'Src IP' in ddos_encoders:
         try:
             data['Src IP'] = ddos_encoders['Src IP'].transform([ctx.ip])[0]
         except ValueError:
             data['Src IP'] = 0
-
     if "Flow Duration" in data.columns:
         data["Flow Duration"] = 1000
-
     if 'BodyLength' in data.columns:
         data['BodyLength'] = len(ctx.body or "")
-
     try:
         return float(ddos_model.predict_proba(data)[0][1])
     except Exception:
@@ -79,16 +74,13 @@ def ddos_score(ctx: RequestContext) -> float:
 def anomaly_score(ctx: RequestContext) -> float:
     if ml_model is None:
         return heuristic_score(ctx)
-
     method_encoded = ANOMALY_METHOD_MAP.get(ctx.method.upper(), 4)
     path_len = len(ctx.path or "")
     body_len = len(ctx.body or "")
     has_query = 1 if "?" in (ctx.path or "") else 0
     tokens = ["select", "union", "drop", "insert", "update", "<script>", "or 1=1"]
     num_suspicious_tokens = sum(t in (ctx.body or "").lower() for t in tokens)
-
     features = [[method_encoded, path_len, body_len, num_suspicious_tokens, has_query]]
-
     try:
         return float(ml_model.predict_proba(features)[0][1])
     except Exception:
