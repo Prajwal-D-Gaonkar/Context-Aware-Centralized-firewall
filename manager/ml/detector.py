@@ -5,7 +5,7 @@ import pandas as pd
 from typing import Optional, Dict, Any
 import os
 
-# ------------------------- Constants
+
 ANOMALY_METHOD_MAP = {"GET": 0, "POST": 1, "PUT": 2, "DELETE": 3}
 
 BASE_DIR = os.path.dirname(__file__)
@@ -14,7 +14,7 @@ DDOS_MODEL_PATH = os.path.join(BASE_DIR, "ddos_model.pkl")
 DDOS_FEATURES_PATH = os.path.join(BASE_DIR, "ddos_features.npy")
 DDOS_ENCODERS_PATH = os.path.join(BASE_DIR, "ddos_encoders.pkl")
 
-# ------------------------- Load models
+
 ml_model = None
 try:
     ml_model = joblib.load(ANOMALY_MODEL_PATH)

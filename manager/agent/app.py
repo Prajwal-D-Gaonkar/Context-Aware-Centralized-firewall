@@ -3,7 +3,7 @@ import time
 import random
 import requests
 
-# Manager API endpoint (where agent sends data)
+
 MANAGER_API_URL = "http://localhost:5000/api/logs"
 
 def generate_dummy_traffic():

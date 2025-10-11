@@ -21,7 +21,7 @@ if not os.path.exists(CSV_PATH):
         'Protocol': [6, 6, 6, 17, 17, 6, 6, 6, 17, 6],
         'Packet Length Max': np.random.randint(50, 1500, 10),
         'Flow ID': ['1.1-2.2-80-443-6']*7 + ['3.3-4.4-21-53-17']*3,
-        'Label': ['BENIGN'] * 7 + ['DDOS'] * 3
+        'Label': ['BENIGN'] * 7 + ['DDOS'] * 3  
     })
 else:
     df = pd.read_csv(CSV_PATH, low_memory=False)

@@ -10,6 +10,9 @@ import uvicorn
 
 from manager.ml.detector import ml_score_model, ddos_score, anomaly_score, RequestContext
 
+
+from manager.agent.summarizerAgent import summarizer
+
 # ---------------- DB Setup ----------------
 DB_FILE = "manager.db"
 db = sqlite3.connect(DB_FILE, check_same_thread=False)
@@ -32,10 +35,14 @@ init_db(db)
 # ---------------- Policies ----------------
 def setup_initial_policies():
     c = db.cursor()
-    c.execute("INSERT OR REPLACE INTO policies (id, app, name, action, conditions) VALUES (?, ?, ?, ?, ?)", 
-              (1, 'global', 'block_admin_post', 'block', json.dumps({"path": "/admin", "method": "POST"})))
-    c.execute("INSERT OR REPLACE INTO policies (id, app, name, action, conditions) VALUES (?, ?, ?, ?, ?)", 
-              (2, 'app_x', 'allow_test_ip', 'allow', json.dumps({"ip": "127.0.0.1"})))
+    c.execute(
+        "INSERT OR REPLACE INTO policies (id, app, name, action, conditions) VALUES (?, ?, ?, ?, ?)",
+        (1, 'global', 'block_admin_post', 'block', json.dumps({"path": "/admin", "method": "POST"}))
+    )
+    c.execute(
+        "INSERT OR REPLACE INTO policies (id, app, name, action, conditions) VALUES (?, ?, ?, ?, ?)",
+        (2, 'app_x', 'allow_test_ip', 'allow', json.dumps({"ip": "127.0.0.1"}))
+    )
     db.commit()
 
 setup_initial_policies()
@@ -43,12 +50,12 @@ setup_initial_policies()
 # ---------------- Policy Loader/Checker ----------------
 def load_policies(app_name: str) -> List[Dict[str, Any]]:
     c = db.cursor()
-    c.execute("SELECT id, app, action, conditions FROM policies WHERE app=? OR app='global'", (app_name,))
+    c.execute("SELECT id, app, name, action, conditions FROM policies WHERE app=? OR app='global'", (app_name,))
     policies = []
-    for policy_id, app, action, conditions_json in c.fetchall():
+    for policy_id, app, name, action, conditions_json in c.fetchall():
         try:
             conditions = json.loads(conditions_json)
-            policies.append({"id": policy_id, "app": app, "action": action, "conditions": conditions})
+            policies.append({"id": policy_id, "app": app, "name": name, "action": action, "conditions": conditions})
         except:
             continue
     return policies
@@ -74,9 +81,10 @@ def check_policies(ctx: RequestContext, policies: List[Dict[str, Any]]) -> Optio
     return None
 
 # ---------------- FastAPI ----------------
-app = FastAPI()
+app = FastAPI(title="CACF Policy Advisor", version="1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
+# ---------------- Request Models ----------------
 class RequestModel(BaseModel):
     app: str
     ip: str
@@ -87,13 +95,23 @@ class RequestModel(BaseModel):
     user: Optional[str] = None
     timestamp: Optional[str] = None
 
+class PolicyModel(BaseModel):
+    app: str
+    name: str
+    description: Optional[str] = ""
+    action: str  # "allow" or "block"
+    conditions: Dict[str, Any]
+
+# ---------------- Event Save ----------------
 def save_event(event):
     c = db.cursor()
     ml_score_val = event.get("ml_score", -1.0)
-    c.execute("""INSERT INTO events (ts, app, ip, path, method, user, verdict, reason, ml_score, payload)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-             (event["ts"], event["app"], event["ip"], event["path"], event["method"], event["user"],
-              event["verdict"], event["reason"], ml_score_val, event["payload"]))
+    c.execute(
+        """INSERT INTO events (ts, app, ip, path, method, user, verdict, reason, ml_score, payload)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (event["ts"], event["app"], event["ip"], event["path"], event["method"], event["user"],
+         event["verdict"], event["reason"], ml_score_val, event["payload"])
+    )
     db.commit()
     return c.lastrowid
 
@@ -101,6 +119,7 @@ def save_event(event):
 ANOMALY_THRESHOLD = 0.95
 DDOS_THRESHOLD = 0.95
 
+# ---------------- Check Request Endpoint ----------------
 @app.post("/check")
 async def check_request(req: RequestModel):
     if not req.app or not req.ip:
@@ -120,27 +139,28 @@ async def check_request(req: RequestModel):
     reason = "No policy matched, ML scores below threshold"
     ml_score_val = None
 
-    # 1. Policy Check
+    # 1️⃣ Policy Check
     policies = load_policies(ctx.app)
     policy_result = check_policies(ctx, policies)
     if policy_result:
         verdict = policy_result["action"]
         reason = policy_result["reason"]
     else:
-        # 2. DDoS ML Check
+        # 2️⃣ DDoS ML Check
         ddos_val = ddos_score(ctx)
         if ddos_val >= DDOS_THRESHOLD:
             verdict = "block"
             reason = f"DDoS ML score {ddos_val:.3f} >= threshold {DDOS_THRESHOLD}"
             ml_score_val = ddos_val
         else:
-            # 3. Anomaly ML Check
+            # 3️⃣ Anomaly ML Check
             anomaly_val = anomaly_score(ctx)
             ml_score_val = anomaly_val
             if anomaly_val >= ANOMALY_THRESHOLD:
                 verdict = "block"
                 reason = f"Anomaly ML score {anomaly_val:.3f} >= threshold {ANOMALY_THRESHOLD}"
 
+    # 4️⃣ Save Event
     event = {
         "ts": ctx.timestamp, "app": ctx.app, "ip": ctx.ip, "path": ctx.path,
         "method": ctx.method, "user": ctx.user, "verdict": verdict,
@@ -148,8 +168,87 @@ async def check_request(req: RequestModel):
     }
     save_event(event)
 
-    return {"allowed": verdict=="allow", "verdict": verdict, "reason": reason, "ml_score": ml_score_val}
+    # 5️⃣ Generate Summary for any block
+    summary = None
+    if verdict == "block":
+        ml_result_str = json.dumps({
+            "allowed": False,
+            "verdict": verdict,
+            "reason": reason,
+            "ml_score": ml_score_val
+        })
+        summary = summarizer(ml_result_str)
 
+    response = {
+        "allowed": verdict == "allow",
+        "verdict": verdict,
+        "reason": reason,
+        "ml_score": ml_score_val,
+    }
+    if summary:
+        response["summary"] = summary
+
+    return response
+
+# ---------------- Add/Update Policy Endpoint ----------------
+@app.post("/policies")
+async def add_policy(policy: PolicyModel):
+    c = db.cursor()
+    c.execute("SELECT id FROM policies WHERE app=? AND name=?", (policy.app, policy.name))
+    existing = c.fetchone()
+    if existing:
+        # Update existing
+        c.execute(
+            "UPDATE policies SET description=?, action=?, conditions=? WHERE id=?",
+            (policy.description, policy.action, json.dumps(policy.conditions), existing[0])
+        )
+        db.commit()
+        return {"status": "updated", "policy_id": existing[0]}
+    else:
+        # Insert new
+        c.execute(
+            "INSERT INTO policies (app, name, description, action, conditions) VALUES (?, ?, ?, ?, ?)",
+            (policy.app, policy.name, policy.description, policy.action, json.dumps(policy.conditions))
+        )
+        db.commit()
+        return {"status": "created", "policy_id": c.lastrowid}
+
+# ---------------- List Policies ----------------
+@app.get("/policies")
+async def list_policies(app_name: Optional[str] = None):
+    c = db.cursor()
+    if app_name:
+        c.execute("SELECT * FROM policies WHERE app=? OR app='global'", (app_name,))
+    else:
+        c.execute("SELECT * FROM policies")
+    rows = c.fetchall()
+    cols = [desc[0] for desc in c.description]
+    return {"policies": [dict(zip(cols, r)) for r in rows]}
+@app.post("/policies")
+async def add_policy(policy: PolicyModel):
+    c = db.cursor()
+    # Check if a policy with the same app and name already exists
+    c.execute("SELECT id FROM policies WHERE app=? AND name=?", (policy.app, policy.name))
+    existing = c.fetchone()
+    if existing:
+        # Update the existing policy
+        c.execute(
+            "UPDATE policies SET description=?, action=?, conditions=? WHERE id=?",
+            (policy.description, policy.action, json.dumps(policy.conditions), existing[0])
+        )
+        db.commit()
+        return {"status": "updated", "policy_id": existing[0]}
+    else:
+        # Insert a new policy
+        c.execute(
+            "INSERT INTO policies (app, name, description, action, conditions) VALUES (?, ?, ?, ?, ?)",
+            (policy.app, policy.name, policy.description, policy.action, json.dumps(policy.conditions))
+        )
+        db.commit()
+        return {"status": "created", "policy_id": c.lastrowid}
+
+
+# ---------------- Health & Events ----------------
 @app.get("/health")
 async def health():
     return {"status": "ok", "time": datetime.datetime.utcnow().isoformat()}
@@ -162,5 +261,6 @@ async def list_events(limit: int = 100):
     cols = [desc[0] for desc in c.description]
     return {"events": [dict(zip(cols, r)) for r in rows]}
 
+# ---------------- Run Server ----------------
 if __name__=="__main__":
     uvicorn.run("manager.main:app", host="0.0.0.0", port=8000, reload=True)
